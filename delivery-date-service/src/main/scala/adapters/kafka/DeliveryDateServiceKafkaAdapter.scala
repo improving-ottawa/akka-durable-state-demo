@@ -2,7 +2,7 @@ package adapters.kafka
 
 import akka.actor.typed.ActorSystem
 import akka.kafka.scaladsl.Consumer
-import akka.kafka.{ConsumerSettings, Subscriptions}
+import akka.kafka.{ ConsumerSettings, Subscriptions }
 import akka.stream.scaladsl._
 import deliverydate.ExternalEvent
 import io.circe.generic.auto._
@@ -22,8 +22,9 @@ object DeliveryDateServiceKafkaAdapter {
   private val topic = "external-events"
 
   def consumeEventsFromKafka(
-    deliveryDateService: DeliveryDateService,
-  )(implicit system: ActorSystem[_]): Unit = {
+    deliveryDateService: DeliveryDateService
+  )(implicit system: ActorSystem[_]
+  ): Unit = {
     implicit val ec: ExecutionContextExecutor = system.executionContext
 
     val consumerSettings: ConsumerSettings[String, String] =
@@ -34,11 +35,10 @@ object DeliveryDateServiceKafkaAdapter {
 
     Consumer
       .plainSource(consumerSettings, Subscriptions.topics(topic))
-      .map(record => {
-        decode[ExternalEvent](record.value())
-      })
+      .map(record => decode[ExternalEvent](record.value()))
       .collect { case Right(event) => event }
       .mapAsync(4) { event =>
+        log.info("Received external event: {}", event)
         deliveryDateService
           .updateDeliveryDate(
             UUID.fromString(event.packageId),
@@ -47,10 +47,6 @@ object DeliveryDateServiceKafkaAdapter {
           .recover { case ex: Throwable =>
             s"DeliveryDateService failed to process event due to ${ex.getMessage}"
           }
-      }
-      .map { result =>
-        log.info(s"*** Result back from DeliveryDateService: $result")
-        result
       }
       .runWith(Sink.ignore)
   }

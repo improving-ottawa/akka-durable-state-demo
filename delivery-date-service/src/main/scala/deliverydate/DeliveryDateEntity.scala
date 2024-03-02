@@ -12,19 +12,29 @@ import cats.data.Validated.{ Invalid, Valid }
 
 import java.time.Instant
 import java.util.UUID
+import scala.annotation.unused
 import scala.concurrent.duration.DurationInt
 
 object DeliveryDateEntity {
 
+  val EntityName = "DeliveryDate"
   val TypeKey: EntityTypeKey[DeliveryDateEntity.Command] =
-    EntityTypeKey[DeliveryDateEntity.Command]("DeliveryDate")
+    EntityTypeKey[DeliveryDateEntity.Command](EntityName)
 
   final case class DeliveryDateState(
     packageId: UUID,
     recentEventId: Option[Int],
     deliveryDate: Option[Instant],
+    previousDeliveryDate: Option[Instant],
     updated: Instant,
-    eventLog: List[String])
+    eventLog: List[String]) {
+
+    def isDeliveryDateUpdated: Boolean =
+      previousDeliveryDate match {
+        case Some(date) => !deliveryDate.contains(date)
+        case None       => deliveryDate.isDefined
+      }
+  }
 
   sealed trait Event {
     val packageId: UUID
@@ -46,17 +56,13 @@ object DeliveryDateEntity {
     replyTo: ActorRef[Reply])
       extends Command
 
-  final case class GetDeliveryDateState(
-    packageId: UUID,
-    replyTo: ActorRef[Reply])
-      extends Command
-
   trait Reply
   final case class UpdateSuccessful(packageId: UUID) extends Reply
   final case class UpdateFailed(packageId: UUID, reason: String) extends Reply
-  final case class StateReply(packageId: UUID, eventLog: List[String])
+  final case class DeliveryDate(packageId: UUID, deliveryDate: Option[Instant])
       extends Reply
 
+  @unused
   private val stateChangeEventHandler =
     ChangeEventHandler[Command, DeliveryDateState, Event](
       updateHandler = {
@@ -78,11 +84,6 @@ object DeliveryDateEntity {
     : (DeliveryDateState, Command) => Effect[DeliveryDateState] = {
     (state, command) =>
       command match {
-        case GetDeliveryDateState(packageId, replyTo) =>
-          Effect
-            .none
-            .thenReply(replyTo)(_ => StateReply(packageId, state.eventLog))
-
         case UpdateDeliveryDate(packageId, eventId, replyTo) =>
           DeliveryDateRuleEngine.evaluate(eventId, state) match {
             case Valid(validatedDate) =>
@@ -93,10 +94,11 @@ object DeliveryDateEntity {
               Effect
                 .persist(
                   DeliveryDateState(
-                    packageId,
-                    Some(eventId),
-                    Some(validatedDate),
-                    processTime,
+                    packageId = packageId,
+                    recentEventId = Some(eventId),
+                    deliveryDate = Some(validatedDate),
+                    previousDeliveryDate = state.deliveryDate,
+                    updated = processTime,
                     eventLog = state.eventLog :+ eventDescription
                   )
                 )
@@ -114,21 +116,21 @@ object DeliveryDateEntity {
 
   def apply(
     packageId: UUID
-  ): DurableStateBehavior[Command, DeliveryDateState] = {
+  ): DurableStateBehavior[Command, DeliveryDateState] =
     DurableStateBehavior[Command, DeliveryDateState](
       persistenceId = PersistenceId(TypeKey.name, packageId.toString),
       emptyState = DeliveryDateState(
         packageId = packageId,
         recentEventId = None,
         deliveryDate = None,
+        previousDeliveryDate = None,
         updated = Instant.now(),
         eventLog = List.empty
       ),
       commandHandler = commandHandler
     )
-      .withChangeEventHandler(stateChangeEventHandler)
+      // .withChangeEventHandler(stateChangeEventHandler)
       .onPersistFailure(
         SupervisorStrategy.restartWithBackoff(200.millis, 5.seconds, 0.1)
       )
-  }
 }
